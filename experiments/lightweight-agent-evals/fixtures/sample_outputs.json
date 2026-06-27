@@ -1,0 +1,12 @@
+[
+  {
+    "id": "strong_status_update",
+    "expected_shape": ["done", "verification", "next"],
+    "text": "Done.\n\n- Added the noindex application portal route at app/freelance.\n- Verification: npm run build passed and curl -I https://www.samzamor.com/freelance returned 200 with x-robots-tag noindex.\n- Next: send me the next job URL and I will generate the package."
+  },
+  {
+    "id": "weak_generic_advice",
+    "expected_shape": ["specific action", "evidence"],
+    "text": "You should consider improving your resume and applying to jobs that match your background. There are many opportunities available if you keep trying."
+  }
+]
