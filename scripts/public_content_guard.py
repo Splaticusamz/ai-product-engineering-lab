@@ -104,17 +104,25 @@ RULES = (
 SELF_ALLOWED_RULES = {"private-material-label"}
 
 
-def tracked_files(root: Path) -> list[Path]:
-    """Return git-tracked files when available; otherwise fall back to a tree walk."""
+def candidate_files(root: Path) -> list[Path]:
+    """Return tracked plus untracked public artifacts when git is available.
+
+    A pre-commit guard that scans only tracked files can miss a newly generated
+    note, fixture, or script before the first commit. Include untracked files that
+    are not ignored so the guard covers the exact material likely to become public.
+    """
 
     try:
         output = subprocess.check_output(
-            ["git", "ls-files"], cwd=root, text=True, stderr=subprocess.DEVNULL
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+            cwd=root,
+            text=True,
+            stderr=subprocess.DEVNULL,
         )
     except (subprocess.CalledProcessError, FileNotFoundError):
         return [path for path in root.rglob("*") if path.is_file()]
 
-    return [root / line for line in output.splitlines() if line.strip()]
+    return sorted({root / line for line in output.splitlines() if line.strip()})
 
 
 def is_scannable(path: Path) -> bool:
@@ -165,7 +173,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    paths = [ROOT / arg for arg in args.paths] if args.paths else tracked_files(ROOT)
+    paths = [ROOT / arg for arg in args.paths] if args.paths else candidate_files(ROOT)
     findings = scan(paths)
 
     if findings:
