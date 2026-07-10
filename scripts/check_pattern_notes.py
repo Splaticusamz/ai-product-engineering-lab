@@ -61,6 +61,13 @@ def first_nonblank_lines(text: str, limit: int = 5) -> list[str]:
     return lines
 
 
+def slugify(value: str) -> str:
+    """Return the filename-style slug used by pattern notes."""
+
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return re.sub(r"-+", "-", slug)
+
+
 def validate_pattern(path: Path) -> list[Finding]:
     text = path.read_text(encoding="utf-8")
     lowered = text.lower()
@@ -71,6 +78,16 @@ def validate_pattern(path: Path) -> list[Finding]:
 
     if not headings or not text.lstrip().startswith("# "):
         findings.append(Finding(path, "must start with a top-level markdown heading"))
+    else:
+        title_slug = slugify(headings[0])
+        file_slug = path.stem.lower()
+        if title_slug != file_slug:
+            findings.append(
+                Finding(
+                    path,
+                    f"top-level heading slug {title_slug!r} should match filename slug {file_slug!r}",
+                )
+            )
 
     if not re.search(r"\buse (this|when)\b", intro, re.IGNORECASE):
         findings.append(Finding(path, "opening lines should state when to use the pattern"))
@@ -100,6 +117,34 @@ def pattern_files() -> list[Path]:
     return sorted(PATTERNS_DIR.glob("*.md"))
 
 
+def top_level_title(path: Path) -> str | None:
+    headings = markdown_headings(path.read_text(encoding="utf-8"))
+    return headings[0] if headings else None
+
+
+def validate_collection(paths: list[Path]) -> list[Finding]:
+    """Catch cross-file drift that single-note checks cannot see."""
+
+    findings: list[Finding] = []
+    seen_titles: dict[str, Path] = {}
+    for path in paths:
+        title = top_level_title(path)
+        if not title:
+            continue
+        title_key = slugify(title)
+        previous = seen_titles.get(title_key)
+        if previous is not None:
+            findings.append(
+                Finding(
+                    path,
+                    f"duplicates top-level heading from {previous.relative_to(ROOT)}",
+                )
+            )
+        else:
+            seen_titles[title_key] = path
+    return findings
+
+
 def main() -> int:
     paths = [ROOT / arg for arg in sys.argv[1:]] if len(sys.argv) > 1 else pattern_files()
     paths = [path for path in paths if path.suffix == ".md" and "patterns" in path.parts]
@@ -107,6 +152,7 @@ def main() -> int:
     findings: list[Finding] = []
     for path in paths:
         findings.extend(validate_pattern(path))
+    findings.extend(validate_collection(paths))
 
     if findings:
         print("Pattern note validation failed:")
