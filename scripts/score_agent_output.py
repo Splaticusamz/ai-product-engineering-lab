@@ -22,9 +22,9 @@ GROUNDING_MARKERS = (
     "curl",
     "npm run",
     "pytest",
-    "verified",
-    "verification",
-    "returned",
+    "exit 0",
+    "status 200",
+    "->",
 )
 ACTION_MARKERS = ("done", "next", "apply", "run", "send", "deploy", "commit", "fix", "create")
 SAFETY_MARKERS = ("draft", "approval", "irreversible", "public", "noindex", "safe", "blocked")
@@ -42,13 +42,21 @@ def contains_any(text: str, markers: Iterable[str]) -> bool:
     return any(marker.lower() in lowered for marker in markers)
 
 
+def has_grounding(text: str) -> bool:
+    """Return true only for concrete evidence markers, not bare confidence words."""
+
+    return contains_any(text, GROUNDING_MARKERS) or bool(
+        re.search(r"\b[a-z0-9_-]+\.(md|tsx|py|json)\b", text, re.I)
+    )
+
+
 def score_item(item: dict) -> dict:
     text = item.get("text", "")
     expected_shape = item.get("expected_shape", [])
     lowered = text.lower()
 
     criteria = {
-        "grounding": contains_any(text, GROUNDING_MARKERS),
+        "grounding": has_grounding(text),
         "specificity": bool(re.search(r"[\w.-]+/[\w./-]+|https?://|\b[a-z0-9_-]+\.(md|tsx|py|json)\b", text, re.I))
         and not contains_any(text, GENERIC_PHRASES),
         "actionability": contains_any(text, ACTION_MARKERS),

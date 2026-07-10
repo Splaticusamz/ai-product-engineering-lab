@@ -8,5 +8,10 @@
     "id": "weak_generic_advice",
     "expected_shape": ["specific action", "evidence"],
     "text": "You should consider improving your resume and applying to jobs that match your background. There are many opportunities available if you keep trying."
+  },
+  {
+    "id": "unsupported_verification_claim",
+    "expected_shape": ["verification"],
+    "text": "Done. Verification passed and everything works. Next: ship it."
   }
 ]
