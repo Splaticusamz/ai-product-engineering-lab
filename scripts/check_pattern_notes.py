@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -145,14 +146,68 @@ def validate_collection(paths: list[Path]) -> list[Finding]:
     return findings
 
 
-def main() -> int:
-    paths = [ROOT / arg for arg in sys.argv[1:]] if len(sys.argv) > 1 else pattern_files()
-    paths = [path for path in paths if path.suffix == ".md" and "patterns" in path.parts]
+def validate_paths(paths: list[Path], collection_paths: list[Path] | None = None) -> list[Finding]:
+    """Validate selected notes without losing collection-level checks.
+
+    A targeted invocation still needs the full collection for duplicate-title
+    detection. Otherwise a new note can pass alone and fail only in a later
+    full-repository validation.
+    """
 
     findings: list[Finding] = []
     for path in paths:
         findings.extend(validate_pattern(path))
-    findings.extend(validate_collection(paths))
+    findings.extend(validate_collection(collection_paths or paths))
+    return findings
+
+
+def run_self_test() -> int:
+    body = (
+        "# Shared Pattern\n\n"
+        "Use this when validating targeted pattern notes.\n\n"
+        "## Acceptance criteria\n\n"
+        "- Has a trigger.\n"
+        "- Has concrete structure.\n"
+        "- Has a collection-unique title.\n"
+    )
+
+    with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+        base = Path(tmp)
+        first = base / "first" / "shared-pattern.md"
+        second = base / "second" / "shared-pattern.md"
+        first.parent.mkdir()
+        second.parent.mkdir()
+        first.write_text(body, encoding="utf-8")
+        second.write_text(body, encoding="utf-8")
+
+        findings = validate_paths([second], [first, second])
+
+    duplicate_findings = [
+        finding for finding in findings if "duplicates top-level heading" in finding.message
+    ]
+    if len(duplicate_findings) != 1:
+        print(
+            "Pattern note validator self-test failed: targeted validation did not "
+            "detect the collection duplicate."
+        )
+        return 1
+
+    print("Pattern note validator self-test passed: targeted validation checks collection uniqueness.")
+    return 0
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if "--self-test" in args:
+        if args != ["--self-test"]:
+            print("--self-test cannot be combined with pattern paths.")
+            return 2
+        return run_self_test()
+
+    paths = [ROOT / arg for arg in args] if args else pattern_files()
+    paths = [path for path in paths if path.suffix == ".md" and "patterns" in path.parts]
+    collection_paths = pattern_files() if args else paths
+    findings = validate_paths(paths, collection_paths)
 
     if findings:
         print("Pattern note validation failed:")
