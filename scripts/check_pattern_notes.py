@@ -31,6 +31,7 @@ REUSABLE_STRUCTURE_HEADINGS = {
     "required fields",
     "review states",
 }
+FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
 
 @dataclass(frozen=True)
@@ -42,9 +43,41 @@ class Finding:
         return f"{self.path.relative_to(ROOT)}: {self.message}"
 
 
-def markdown_headings(text: str) -> list[str]:
-    headings: list[str] = []
+def lines_outside_fences(text: str) -> list[str]:
+    """Return document lines without fenced examples.
+
+    Pattern notes often include Markdown templates. Headings and list items inside
+    those examples must not satisfy the structure required from the note itself.
+    Unclosed fences are handled by the repository-wide Markdown validator.
+    """
+
+    lines: list[str] = []
+    fence_char: str | None = None
+    fence_length = 0
+
     for line in text.splitlines():
+        match = FENCE_RE.match(line)
+        if fence_char is None:
+            if match:
+                marker = match.group(1)
+                fence_char = marker[0]
+                fence_length = len(marker)
+                continue
+            lines.append(line)
+            continue
+
+        if match:
+            marker, suffix = match.groups()
+            if marker[0] == fence_char and len(marker) >= fence_length and not suffix.strip():
+                fence_char = None
+                fence_length = 0
+
+    return lines
+
+
+def markdown_headings(lines: list[str]) -> list[str]:
+    headings: list[str] = []
+    for line in lines:
         match = re.match(r"^#{1,6}\s+(.+?)\s*$", line)
         if match:
             headings.append(match.group(1).strip())
@@ -72,9 +105,10 @@ def slugify(value: str) -> str:
 def validate_pattern(path: Path) -> list[Finding]:
     text = path.read_text(encoding="utf-8")
     lowered = text.lower()
-    headings = markdown_headings(text)
+    structural_lines = lines_outside_fences(text)
+    headings = markdown_headings(structural_lines)
     normalized_headings = {heading.lower() for heading in headings}
-    intro = "\n".join(first_nonblank_lines(text))
+    intro = "\n".join(first_nonblank_lines("\n".join(structural_lines)))
     findings: list[Finding] = []
 
     if not headings or not text.lstrip().startswith("# "):
@@ -99,7 +133,7 @@ def validate_pattern(path: Path) -> list[Finding]:
 
     bullet_or_table_rows = [
         line
-        for line in text.splitlines()
+        for line in structural_lines
         if re.match(r"^\s*(- |\d+\. |\| .+ \|)", line)
     ]
     if len(bullet_or_table_rows) < 3:
@@ -119,7 +153,8 @@ def pattern_files() -> list[Path]:
 
 
 def top_level_title(path: Path) -> str | None:
-    headings = markdown_headings(path.read_text(encoding="utf-8"))
+    lines = lines_outside_fences(path.read_text(encoding="utf-8"))
+    headings = markdown_headings(lines)
     return headings[0] if headings else None
 
 
@@ -162,7 +197,7 @@ def validate_paths(paths: list[Path], collection_paths: list[Path] | None = None
 
 
 def run_self_test() -> int:
-    body = (
+    duplicate_body = (
         "# Shared Pattern\n\n"
         "Use this when validating targeted pattern notes.\n\n"
         "## Acceptance criteria\n\n"
@@ -170,29 +205,80 @@ def run_self_test() -> int:
         "- Has concrete structure.\n"
         "- Has a collection-unique title.\n"
     )
+    fenced_structure_body = (
+        "# Fenced Structure\n\n"
+        "Use this when proving examples cannot satisfy document requirements.\n\n"
+        "```markdown\n"
+        "## Acceptance Criteria\n"
+        "- First concrete step.\n"
+        "- Second concrete step.\n"
+        "- Third concrete step.\n"
+        "```\n"
+    )
+    valid_body = (
+        "# Valid Pattern\n\n"
+        "Use this when checking a complete reusable pattern.\n\n"
+        "## Acceptance Criteria\n\n"
+        "- Has a trigger.\n"
+        "- Has concrete structure.\n"
+        "- Ignores example headings.\n\n"
+        "```markdown\n"
+        "# Example Title\n"
+        "```\n"
+    )
 
     with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
         base = Path(tmp)
         first = base / "first" / "shared-pattern.md"
         second = base / "second" / "shared-pattern.md"
+        fenced_structure = base / "fenced-structure.md"
+        valid = base / "valid-pattern.md"
         first.parent.mkdir()
         second.parent.mkdir()
-        first.write_text(body, encoding="utf-8")
-        second.write_text(body, encoding="utf-8")
+        first.write_text(duplicate_body, encoding="utf-8")
+        second.write_text(duplicate_body, encoding="utf-8")
+        fenced_structure.write_text(fenced_structure_body, encoding="utf-8")
+        valid.write_text(valid_body, encoding="utf-8")
 
-        findings = validate_paths([second], [first, second])
+        duplicate_findings = validate_paths([second], [first, second])
+        fenced_findings = validate_pattern(fenced_structure)
+        valid_findings = validate_pattern(valid)
 
-    duplicate_findings = [
-        finding for finding in findings if "duplicates top-level heading" in finding.message
+    duplicate_messages = [finding.message for finding in duplicate_findings]
+    expected_duplicate_messages = [
+        "duplicates top-level heading from " + str(first.relative_to(ROOT))
     ]
-    if len(duplicate_findings) != 1:
+    if duplicate_messages != expected_duplicate_messages:
         print(
-            "Pattern note validator self-test failed: targeted validation did not "
-            "detect the collection duplicate."
+            "Pattern note validator self-test failed for collection duplicate: "
+            f"expected {expected_duplicate_messages}, got {duplicate_messages}"
         )
         return 1
 
-    print("Pattern note validator self-test passed: targeted validation checks collection uniqueness.")
+    expected_fenced_messages = [
+        "missing reusable structure heading; expected one of: "
+        + ", ".join(sorted(REUSABLE_STRUCTURE_HEADINGS)),
+        "needs at least three concrete bullets, steps, or table rows",
+    ]
+    actual_fenced_messages = [finding.message for finding in fenced_findings]
+    if actual_fenced_messages != expected_fenced_messages:
+        print(
+            "Pattern note validator self-test failed for fenced structure: "
+            f"expected {expected_fenced_messages}, got {actual_fenced_messages}"
+        )
+        return 1
+
+    if valid_findings:
+        print(
+            "Pattern note validator self-test failed for valid pattern: "
+            f"expected no findings, got {[finding.message for finding in valid_findings]}"
+        )
+        return 1
+
+    print(
+        "Pattern note validator self-test passed: collection uniqueness and "
+        "fenced-example isolation verified."
+    )
     return 0
 
 
