@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +25,7 @@ FORBIDDEN_PLACEHOLDERS = (
     "coming soon",
     "placeholder",
 )
+FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
 
 @dataclass(frozen=True)
@@ -35,9 +37,36 @@ class Finding:
         return f"{self.path.relative_to(ROOT)}: {self.message}"
 
 
-def markdown_headings(text: str) -> set[str]:
-    headings: set[str] = set()
+def lines_outside_fences(text: str) -> list[str]:
+    """Return document lines without headings from fenced examples."""
+
+    lines: list[str] = []
+    fence_char: str | None = None
+    fence_length = 0
+
     for line in text.splitlines():
+        match = FENCE_RE.match(line)
+        if fence_char is None:
+            if match:
+                marker = match.group(1)
+                fence_char = marker[0]
+                fence_length = len(marker)
+                continue
+            lines.append(line)
+            continue
+
+        if match:
+            marker, suffix = match.groups()
+            if marker[0] == fence_char and len(marker) >= fence_length and not suffix.strip():
+                fence_char = None
+                fence_length = 0
+
+    return lines
+
+
+def markdown_headings(lines: list[str]) -> set[str]:
+    headings: set[str] = set()
+    for line in lines:
         match = re.match(r"^#{1,6}\s+(.+?)\s*$", line)
         if match:
             headings.add(match.group(1).strip().lower())
@@ -46,7 +75,7 @@ def markdown_headings(text: str) -> set[str]:
 
 def validate_note(path: Path) -> list[Finding]:
     text = path.read_text(encoding="utf-8")
-    headings = markdown_headings(text)
+    headings = markdown_headings(lines_outside_fences(text))
     lowered = text.lower()
     findings: list[Finding] = []
 
@@ -68,6 +97,53 @@ def validate_note(path: Path) -> list[Finding]:
     return findings
 
 
+def run_self_test() -> int:
+    fixtures = {
+        "fenced-structure-only": (
+            "# Fenced Structure Only\n\n"
+            "This note puts required experiment structure only inside an example.\n\n"
+            "```markdown\n"
+            "## Question\n"
+            "## Hypothesis\n"
+            "## Results\n"
+            "```\n",
+            [
+                "missing required heading: 'question'",
+                "missing required heading: 'hypothesis'",
+                "missing outcome heading; expected one of: run, takeaway, contribution quality bar, results",
+            ],
+        ),
+        "valid-with-fenced-examples": (
+            "# Valid Experiment\n\n"
+            "## Question\n\nCan this validator distinguish examples from document structure?\n\n"
+            "## Hypothesis\n\nOnly headings outside fences should satisfy required sections.\n\n"
+            "## Results\n\nThe focused fixture defines the expected behavior.\n\n"
+            "```markdown\n## Question\n## Hypothesis\n## Results\n```\n",
+            [],
+        ),
+    }
+
+    with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+        base = Path(tmp)
+        for name, (text, expected) in fixtures.items():
+            path = base / name / "README.md"
+            path.parent.mkdir()
+            path.write_text(text, encoding="utf-8")
+            actual = [finding.message for finding in validate_note(path)]
+            if actual != expected:
+                print(
+                    f"Experiment note validator self-test failed for {name}: "
+                    f"expected {expected}, got {actual}"
+                )
+                return 1
+
+    print(
+        "Experiment note validator self-test passed: fenced-only headings rejected "
+        f"and valid structure accepted across {len(fixtures)} fixtures."
+    )
+    return 0
+
+
 def experiment_readmes() -> list[Path]:
     if not EXPERIMENTS_DIR.exists():
         return []
@@ -75,7 +151,14 @@ def experiment_readmes() -> list[Path]:
 
 
 def main() -> int:
-    paths = [ROOT / arg for arg in sys.argv[1:]] if len(sys.argv) > 1 else experiment_readmes()
+    args = sys.argv[1:]
+    if "--self-test" in args:
+        if args != ["--self-test"]:
+            print("--self-test cannot be combined with experiment paths.")
+            return 2
+        return run_self_test()
+
+    paths = [ROOT / arg for arg in args] if args else experiment_readmes()
     paths = [path for path in paths if path.name == "README.md" and "experiments" in path.parts]
 
     findings: list[Finding] = []
