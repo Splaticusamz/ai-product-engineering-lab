@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
-"""Validate basic repository markdown structure.
+"""Validate repository Markdown structure and local artifact links.
 
 The checks stay intentionally small, but they distinguish document structure from
-examples inside fenced code blocks so malformed generated notes cannot pass by
-accident.
+examples inside fenced code blocks and reject relative links that are missing or
+escape the repository.
 """
 
 from __future__ import annotations
 
 import argparse
 import re
+import tempfile
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 IGNORE_DIRS = {".git", "node_modules", ".next", "dist", "build"}
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+INLINE_LINK_RE = re.compile(
+    r"!?\[[^\]]*\]\(\s*(?:<([^>]+)>|((?:[^\s()]|\([^()]*\))+))"
+)
+REFERENCE_LINK_RE = re.compile(r"^ {0,3}\[[^\]]+\]:\s*(?:<([^>]+)>|([^\s]+))")
 
 
 def iter_markdown_files() -> list[Path]:
@@ -26,10 +32,10 @@ def iter_markdown_files() -> list[Path]:
     return sorted(files)
 
 
-def structural_lines(text: str) -> tuple[list[str], str | None]:
-    """Return lines outside fenced code and any unclosed opening fence."""
+def numbered_structural_lines(text: str) -> tuple[list[tuple[int, str]], str | None]:
+    """Return numbered lines outside fenced code and any unclosed opening fence."""
 
-    lines: list[str] = []
+    lines: list[tuple[int, str]] = []
     fence_char: str | None = None
     fence_length = 0
     opening_fence: str | None = None
@@ -43,7 +49,7 @@ def structural_lines(text: str) -> tuple[list[str], str | None]:
                 fence_length = len(marker)
                 opening_fence = f"line {line_number} ({marker})"
                 continue
-            lines.append(line)
+            lines.append((line_number, line))
             continue
 
         if match:
@@ -54,6 +60,13 @@ def structural_lines(text: str) -> tuple[list[str], str | None]:
                 opening_fence = None
 
     return lines, opening_fence
+
+
+def structural_lines(text: str) -> tuple[list[str], str | None]:
+    """Return lines outside fenced code and any unclosed opening fence."""
+
+    numbered_lines, opening_fence = numbered_structural_lines(text)
+    return [line for _, line in numbered_lines], opening_fence
 
 
 def validate_text(text: str) -> list[str]:
@@ -79,12 +92,52 @@ def validate_text(text: str) -> list[str]:
     return failures
 
 
+def validate_local_links(text: str, source_path: Path) -> list[str]:
+    """Reject missing or repo-escaping relative links outside code fences."""
+
+    failures: list[str] = []
+    numbered_lines, _ = numbered_structural_lines(text)
+    root = ROOT.resolve()
+
+    for line_number, line in numbered_lines:
+        matches = list(INLINE_LINK_RE.finditer(line))
+        reference_match = REFERENCE_LINK_RE.match(line)
+        if reference_match:
+            matches.append(reference_match)
+
+        for match in matches:
+            target = next(group for group in match.groups() if group is not None)
+            parsed = urlsplit(target)
+            if parsed.scheme or target.startswith(("#", "//", "/")) or not parsed.path:
+                continue
+
+            candidate = (source_path.parent / unquote(parsed.path)).resolve()
+            try:
+                candidate.relative_to(root)
+            except ValueError:
+                failures.append(
+                    f"line {line_number}: local link escapes repository: {target!r}"
+                )
+                continue
+
+            if not candidate.exists():
+                failures.append(
+                    f"line {line_number}: local link target does not exist: {target!r}"
+                )
+
+    return failures
+
+
+def validate_path(path: Path) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    return validate_text(text) + validate_local_links(text, path)
+
+
 def validate_files(paths: list[Path]) -> list[str]:
     failures: list[str] = []
     for path in paths:
-        text = path.read_text(encoding="utf-8")
         rel = path.relative_to(ROOT)
-        for message in validate_text(text):
+        for message in validate_path(path):
             failures.append(f"{rel}: {message}")
     return failures
 
@@ -126,7 +179,65 @@ def run_self_test() -> int:
             )
             return 1
 
-    print(f"Markdown validator self-test passed for {len(fixtures)} fixtures.")
+    with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+        base = Path(tmp)
+        target = base / "target.md"
+        target.write_text("# Target\n\nA real target for relative-link validation.\n", encoding="utf-8")
+        versioned_target = base / "target_(v2).md"
+        versioned_target.write_text(
+            "# Versioned target\n\nA target whose valid Markdown path contains parentheses.\n",
+            encoding="utf-8",
+        )
+
+        valid = base / "valid-links.md"
+        valid.write_text(
+            "# Valid links\n\n"
+            "This fixture links to real artifacts and ignores links shown only as examples.\n\n"
+            "[real target](target.md)\n"
+            "[versioned target](target_(v2).md)\n\n"
+            "```markdown\n[example only](missing-example.md)\n```\n",
+            encoding="utf-8",
+        )
+        broken = base / "broken-link.md"
+        broken.write_text(
+            "# Broken link\n\n"
+            "This fixture is long enough and points to a local artifact that does not exist.\n\n"
+            "[missing artifact](missing.md)\n",
+            encoding="utf-8",
+        )
+        escaping = base / "escaping-link.md"
+        escaping.write_text(
+            "# Escaping link\n\n"
+            "This fixture is long enough and points beyond the public repository boundary.\n\n"
+            "[outside artifact](../../outside.md)\n",
+            encoding="utf-8",
+        )
+
+        link_expectations = {
+            "valid-links": (valid, []),
+            "broken-link": (
+                broken,
+                ["line 5: local link target does not exist: 'missing.md'"],
+            ),
+            "escaping-link": (
+                escaping,
+                ["line 5: local link escapes repository: '../../outside.md'"],
+            ),
+        }
+        for name, (path, expected) in link_expectations.items():
+            actual = validate_path(path)
+            if actual != expected:
+                print(
+                    f"Markdown validator self-test failed for {name}: "
+                    f"expected {expected}, got {actual}"
+                )
+                return 1
+
+    total_fixtures = len(fixtures) + len(link_expectations)
+    print(
+        f"Markdown validator self-test passed for {total_fixtures} fixtures, "
+        "including fenced examples and local link targets."
+    )
     return 0
 
 
@@ -135,7 +246,7 @@ def main() -> int:
     parser.add_argument(
         "--self-test",
         action="store_true",
-        help="Run focused fixtures for heading and code-fence handling.",
+        help="Run focused fixtures for headings, code fences, and local links.",
     )
     args = parser.parse_args()
 
