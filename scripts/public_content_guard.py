@@ -32,15 +32,21 @@ EXCLUDED_DIRS = {
 
 TEXT_SUFFIXES = {
     "",
+    ".cfg",
+    ".conf",
     ".css",
     ".csv",
     ".env",
     ".html",
+    ".ini",
     ".js",
     ".json",
     ".jsx",
+    ".key",
     ".md",
     ".mjs",
+    ".pem",
+    ".properties",
     ".py",
     ".sh",
     ".toml",
@@ -163,22 +169,36 @@ def scan(paths: Iterable[Path]) -> list[str]:
 
 
 def run_untracked_probe() -> int:
-    """Verify the default scan catches a newly generated untracked artifact.
+    """Verify untracked secret-bearing formats are scanned without false alarms.
 
     This guards against the most dangerous public-repo failure mode for this lab:
-    an automation run creates a fresh note, fixture, or script that is never scanned
-    because the guard only looked at files already tracked by git.
+    an automation run creates a fresh note, config, or credential file that is never
+    scanned because the guard only looked at tracked files or familiar source suffixes.
     """
 
-    probe = ROOT / ".public-content-guard-probe.txt"
-    if probe.exists():
-        print(f"Self-test refused to overwrite existing probe: {probe.relative_to(ROOT)}")
+    private_key_probe = ROOT / ".public-content-guard-private-key.pem"
+    token_probe = ROOT / ".public-content-guard-token.ini"
+    safe_probe = ROOT / ".public-content-guard-safe.conf"
+    probes = (private_key_probe, token_probe, safe_probe)
+    existing = [str(path.relative_to(ROOT)) for path in probes if path.exists()]
+    if existing:
+        print(f"Self-test refused to overwrite existing probes: {', '.join(existing)}")
         return 1
 
     fake_token = "ghp_" + ("A" * 36)
-    probe.write_text(
-        "temporary guard self-test file\n"
-        f"fake credential that must be caught: {fake_token}\n",
+    private_key_probe.write_text(
+        "temporary PEM guard self-test file\n"
+        "-----BEGIN " + "PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----\n",
+        encoding="utf-8",
+    )
+    token_probe.write_text(
+        "[credentials]\n"
+        f"token={fake_token}\n",
+        encoding="utf-8",
+    )
+    safe_probe.write_text(
+        "mode=development\n"
+        "retries=2\n",
         encoding="utf-8",
     )
 
@@ -186,14 +206,30 @@ def run_untracked_probe() -> int:
         paths = candidate_files(ROOT)
         findings = scan(paths)
     finally:
-        probe.unlink(missing_ok=True)
+        for probe in probes:
+            probe.unlink(missing_ok=True)
 
-    probe_name = str(probe.relative_to(ROOT))
-    if not any(probe_name in finding and "github-token" in finding for finding in findings):
-        print("Public content guard self-test failed: untracked probe was not detected.")
+    probe_names = {str(path.relative_to(ROOT)) for path in probes}
+    probe_findings = [
+        finding for finding in findings if finding.split(":", maxsplit=1)[0] in probe_names
+    ]
+    expected = [
+        ".public-content-guard-private-key.pem:2: private-key-block — "
+        "Remove private key material and rotate the exposed key.",
+        ".public-content-guard-token.ini:2: github-token — "
+        "Remove GitHub tokens from public artifacts and rotate the token.",
+    ]
+    if probe_findings != expected:
+        print(
+            "Public content guard self-test failed: "
+            f"expected {expected}, got {probe_findings}"
+        )
         return 1
 
-    print(f"Public content guard self-test passed: detected untracked probe in {len(paths)} candidate files.")
+    print(
+        "Public content guard self-test passed: detected PEM and INI secrets, "
+        f"ignored a safe config, and scanned {len(paths)} candidate files."
+    )
     return 0
 
 
@@ -209,7 +245,7 @@ def main() -> int:
     parser.add_argument(
         "--self-test",
         action="store_true",
-        help="Create a temporary untracked probe and verify the default scan catches it.",
+        help="Verify untracked credential/config formats are scanned without flagging a safe fixture.",
     )
     args = parser.parse_args()
 
