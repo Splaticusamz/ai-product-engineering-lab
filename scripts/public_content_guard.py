@@ -134,7 +134,9 @@ def candidate_files(root: Path) -> list[Path]:
 def is_scannable(path: Path) -> bool:
     if any(part in EXCLUDED_DIRS for part in path.relative_to(ROOT).parts):
         return False
-    if path.suffix.lower() not in TEXT_SUFFIXES:
+    name = path.name.lower()
+    is_dotenv = name == ".env" or name.startswith(".env.")
+    if path.suffix.lower() not in TEXT_SUFFIXES and not is_dotenv:
         return False
     try:
         return path.stat().st_size <= MAX_TEXT_BYTES
@@ -176,16 +178,23 @@ def run_untracked_probe() -> int:
     scanned because the guard only looked at tracked files or familiar source suffixes.
     """
 
+    dotenv_probe = ROOT / ".env.local"
     private_key_probe = ROOT / ".public-content-guard-private-key.pem"
     token_probe = ROOT / ".public-content-guard-token.ini"
     safe_probe = ROOT / ".public-content-guard-safe.conf"
-    probes = (private_key_probe, token_probe, safe_probe)
+    probes = (dotenv_probe, private_key_probe, token_probe, safe_probe)
     existing = [str(path.relative_to(ROOT)) for path in probes if path.exists()]
     if existing:
         print(f"Self-test refused to overwrite existing probes: {', '.join(existing)}")
         return 1
 
     fake_token = "ghp_" + ("A" * 36)
+    fake_openai_key = "sk-proj-" + ("A" * 40)
+    dotenv_probe.write_text(
+        "# temporary dotenv guard self-test file\n"
+        f"OPENAI_API_KEY={fake_openai_key}\n",
+        encoding="utf-8",
+    )
     private_key_probe.write_text(
         "temporary PEM guard self-test file\n"
         "-----BEGIN " + "PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----\n",
@@ -214,6 +223,8 @@ def run_untracked_probe() -> int:
         finding for finding in findings if finding.split(":", maxsplit=1)[0] in probe_names
     ]
     expected = [
+        ".env.local:2: openai-key — "
+        "Remove model-provider API keys and rotate the credential.",
         ".public-content-guard-private-key.pem:2: private-key-block — "
         "Remove private key material and rotate the exposed key.",
         ".public-content-guard-token.ini:2: github-token — "
@@ -227,7 +238,7 @@ def run_untracked_probe() -> int:
         return 1
 
     print(
-        "Public content guard self-test passed: detected PEM and INI secrets, "
+        "Public content guard self-test passed: detected dotenv, PEM, and INI secrets, "
         f"ignored a safe config, and scanned {len(paths)} candidate files."
     )
     return 0
