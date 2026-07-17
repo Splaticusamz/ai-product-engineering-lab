@@ -141,11 +141,13 @@ def is_scannable(path: Path) -> bool:
     return True
 
 
-def read_text(path: Path) -> str | None:
+def read_text(path: Path) -> tuple[str | None, bool]:
+    """Read UTF-8 text and report decode failures instead of silently skipping them."""
+
     try:
-        return path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8"), False
     except UnicodeDecodeError:
-        return None
+        return None, True
 
 
 def scan(paths: Iterable[Path]) -> list[str]:
@@ -166,9 +168,14 @@ def scan(paths: Iterable[Path]) -> list[str]:
                 f"review it manually or keep it below the {MAX_TEXT_BYTES}-byte scan limit."
             )
             continue
-        text = read_text(path)
-        if text is None:
+        text, decode_failed = read_text(path)
+        if decode_failed:
+            findings.append(
+                f"{rel}: non-utf8-text-file — File uses invalid UTF-8; "
+                "convert it to UTF-8 or inspect it manually before publishing."
+            )
             continue
+        assert text is not None
         for line_number, line in enumerate(text.splitlines(), start=1):
             for rule in RULES:
                 if path.resolve() == self_path and rule.name in SELF_ALLOWED_RULES:
@@ -191,7 +198,15 @@ def run_untracked_probe() -> int:
     token_probe = ROOT / ".public-content-guard-token.ini"
     safe_probe = ROOT / ".public-content-guard-safe.conf"
     oversized_probe = ROOT / ".public-content-guard-oversized.txt"
-    probes = (dotenv_probe, private_key_probe, token_probe, safe_probe, oversized_probe)
+    invalid_utf8_probe = ROOT / ".public-content-guard-invalid-utf8.txt"
+    probes = (
+        dotenv_probe,
+        private_key_probe,
+        token_probe,
+        safe_probe,
+        oversized_probe,
+        invalid_utf8_probe,
+    )
     existing = [str(path.relative_to(ROOT)) for path in probes if path.exists()]
     if existing:
         print(f"Self-test refused to overwrite existing probes: {', '.join(existing)}")
@@ -220,6 +235,7 @@ def run_untracked_probe() -> int:
         encoding="utf-8",
     )
     oversized_probe.write_bytes(b"A" * (MAX_TEXT_BYTES + 1))
+    invalid_utf8_probe.write_bytes(b"public note prefix\xff\xfepayload")
 
     try:
         paths = candidate_files(ROOT)
@@ -235,6 +251,8 @@ def run_untracked_probe() -> int:
     expected = [
         ".env.local:2: openai-key — "
         "Remove model-provider API keys and rotate the credential.",
+        ".public-content-guard-invalid-utf8.txt: non-utf8-text-file — "
+        "File uses invalid UTF-8; convert it to UTF-8 or inspect it manually before publishing.",
         ".public-content-guard-oversized.txt: oversized-text-file — "
         f"File is {MAX_TEXT_BYTES + 1} bytes; review it manually or keep it below the "
         f"{MAX_TEXT_BYTES}-byte scan limit.",
@@ -252,7 +270,8 @@ def run_untracked_probe() -> int:
 
     print(
         "Public content guard self-test passed: detected dotenv, PEM, and INI secrets, "
-        f"rejected an oversized text artifact, ignored a safe config, and scanned {len(paths)} candidate files."
+        "rejected oversized and invalid-UTF-8 text artifacts, ignored a safe config, "
+        f"and scanned {len(paths)} candidate files."
     )
     return 0
 
