@@ -138,10 +138,7 @@ def is_scannable(path: Path) -> bool:
     is_dotenv = name == ".env" or name.startswith(".env.")
     if path.suffix.lower() not in TEXT_SUFFIXES and not is_dotenv:
         return False
-    try:
-        return path.stat().st_size <= MAX_TEXT_BYTES
-    except OSError:
-        return False
+    return True
 
 
 def read_text(path: Path) -> str | None:
@@ -157,10 +154,21 @@ def scan(paths: Iterable[Path]) -> list[str]:
     for path in paths:
         if not is_scannable(path):
             continue
+        rel = path.relative_to(ROOT)
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            findings.append(f"{rel}: unreadable-file — Could not inspect file metadata: {exc}")
+            continue
+        if size > MAX_TEXT_BYTES:
+            findings.append(
+                f"{rel}: oversized-text-file — File is {size} bytes; "
+                f"review it manually or keep it below the {MAX_TEXT_BYTES}-byte scan limit."
+            )
+            continue
         text = read_text(path)
         if text is None:
             continue
-        rel = path.relative_to(ROOT)
         for line_number, line in enumerate(text.splitlines(), start=1):
             for rule in RULES:
                 if path.resolve() == self_path and rule.name in SELF_ALLOWED_RULES:
@@ -182,7 +190,8 @@ def run_untracked_probe() -> int:
     private_key_probe = ROOT / ".public-content-guard-private-key.pem"
     token_probe = ROOT / ".public-content-guard-token.ini"
     safe_probe = ROOT / ".public-content-guard-safe.conf"
-    probes = (dotenv_probe, private_key_probe, token_probe, safe_probe)
+    oversized_probe = ROOT / ".public-content-guard-oversized.txt"
+    probes = (dotenv_probe, private_key_probe, token_probe, safe_probe, oversized_probe)
     existing = [str(path.relative_to(ROOT)) for path in probes if path.exists()]
     if existing:
         print(f"Self-test refused to overwrite existing probes: {', '.join(existing)}")
@@ -210,6 +219,7 @@ def run_untracked_probe() -> int:
         "retries=2\n",
         encoding="utf-8",
     )
+    oversized_probe.write_bytes(b"A" * (MAX_TEXT_BYTES + 1))
 
     try:
         paths = candidate_files(ROOT)
@@ -225,6 +235,9 @@ def run_untracked_probe() -> int:
     expected = [
         ".env.local:2: openai-key — "
         "Remove model-provider API keys and rotate the credential.",
+        ".public-content-guard-oversized.txt: oversized-text-file — "
+        f"File is {MAX_TEXT_BYTES + 1} bytes; review it manually or keep it below the "
+        f"{MAX_TEXT_BYTES}-byte scan limit.",
         ".public-content-guard-private-key.pem:2: private-key-block — "
         "Remove private key material and rotate the exposed key.",
         ".public-content-guard-token.ini:2: github-token — "
@@ -239,7 +252,7 @@ def run_untracked_probe() -> int:
 
     print(
         "Public content guard self-test passed: detected dotenv, PEM, and INI secrets, "
-        f"ignored a safe config, and scanned {len(paths)} candidate files."
+        f"rejected an oversized text artifact, ignored a safe config, and scanned {len(paths)} candidate files."
     )
     return 0
 
