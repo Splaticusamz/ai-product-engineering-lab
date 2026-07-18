@@ -9,6 +9,7 @@ product-engineering notes, fixtures, or scripts.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -92,15 +93,20 @@ def candidate_files(root: Path) -> list[Path]:
 
     try:
         output = subprocess.check_output(
-            ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
             cwd=root,
-            text=True,
             stderr=subprocess.DEVNULL,
         )
     except (subprocess.CalledProcessError, FileNotFoundError):
         return [path for path in root.rglob("*") if path.is_file()]
 
-    return sorted({root / line for line in output.splitlines() if line.strip()})
+    return sorted({root / os.fsdecode(item) for item in output.split(b"\0") if item})
+
+
+def display_path(path: Path) -> str:
+    """Render control characters without letting filenames corrupt guard output."""
+
+    return path.as_posix().encode("unicode_escape").decode("ascii")
 
 
 def is_scannable(path: Path) -> bool:
@@ -131,21 +137,22 @@ def scan(paths: Iterable[Path]) -> list[str]:
         if not is_scannable(path):
             continue
         rel = path.relative_to(ROOT)
+        shown_path = display_path(rel)
         try:
             size = path.stat().st_size
         except OSError as exc:
-            findings.append(f"{rel}: unreadable-file — Could not inspect file metadata: {exc}")
+            findings.append(f"{shown_path}: unreadable-file — Could not inspect file metadata: {exc}")
             continue
         if size > MAX_TEXT_BYTES:
             findings.append(
-                f"{rel}: oversized-text-file — File is {size} bytes; "
+                f"{shown_path}: oversized-text-file — File is {size} bytes; "
                 f"review it manually or keep it below the {MAX_TEXT_BYTES}-byte scan limit."
             )
             continue
         text, decode_failed = read_text(path)
         if decode_failed:
             findings.append(
-                f"{rel}: non-utf8-text-file — File uses invalid UTF-8; "
+                f"{shown_path}: non-utf8-text-file — File uses invalid UTF-8; "
                 "convert it to UTF-8 or inspect it manually before publishing."
             )
             continue
@@ -155,7 +162,7 @@ def scan(paths: Iterable[Path]) -> list[str]:
                 if path.resolve() == self_path and rule.name in SELF_ALLOWED_RULES:
                     continue
                 if rule.pattern.search(line):
-                    findings.append(f"{rel}:{line_number}: {rule.name} — {rule.guidance}")
+                    findings.append(f"{shown_path}:{line_number}: {rule.name} — {rule.guidance}")
     return findings
 
 
@@ -171,6 +178,7 @@ def run_untracked_probe() -> int:
     private_key_probe = ROOT / ".public-content-guard-private-key.pem"
     token_probe = ROOT / ".public-content-guard-token.ini"
     arbitrary_suffix_probe = ROOT / ".public-content-guard-token.xml"
+    newline_probe = ROOT / ".public-content-guard-newline\nprobe.txt"
     safe_probe = ROOT / ".public-content-guard-safe.conf"
     oversized_probe = ROOT / ".public-content-guard-oversized.txt"
     invalid_utf8_probe = ROOT / ".public-content-guard-invalid-utf8.txt"
@@ -179,6 +187,7 @@ def run_untracked_probe() -> int:
         private_key_probe,
         token_probe,
         arbitrary_suffix_probe,
+        newline_probe,
         safe_probe,
         oversized_probe,
         invalid_utf8_probe,
@@ -211,6 +220,7 @@ def run_untracked_probe() -> int:
         "</credentials>\n",
         encoding="utf-8",
     )
+    newline_probe.write_text(f"token={fake_token}\n", encoding="utf-8")
     safe_probe.write_text(
         "mode=development\n"
         "retries=2\n",
@@ -226,7 +236,7 @@ def run_untracked_probe() -> int:
         for probe in probes:
             probe.unlink(missing_ok=True)
 
-    probe_names = {str(path.relative_to(ROOT)) for path in probes}
+    probe_names = {display_path(path.relative_to(ROOT)) for path in probes}
     probe_findings = [
         finding for finding in findings if finding.split(":", maxsplit=1)[0] in probe_names
     ]
@@ -235,6 +245,8 @@ def run_untracked_probe() -> int:
         "Remove model-provider API keys and rotate the credential.",
         ".public-content-guard-invalid-utf8.txt: non-utf8-text-file — "
         "File uses invalid UTF-8; convert it to UTF-8 or inspect it manually before publishing.",
+        ".public-content-guard-newline\\nprobe.txt:1: github-token — "
+        "Remove GitHub tokens from public artifacts and rotate the token.",
         ".public-content-guard-oversized.txt: oversized-text-file — "
         f"File is {MAX_TEXT_BYTES + 1} bytes; review it manually or keep it below the "
         f"{MAX_TEXT_BYTES}-byte scan limit.",
@@ -253,7 +265,7 @@ def run_untracked_probe() -> int:
         return 1
 
     print(
-        "Public content guard self-test passed: detected dotenv, PEM, INI, and arbitrary-suffix secrets, "
+        "Public content guard self-test passed: detected dotenv, PEM, INI, arbitrary-suffix, and newline-path secrets, "
         "rejected oversized and invalid-UTF-8 text artifacts, ignored a safe config, "
         f"and scanned {len(paths)} candidate files."
     )
