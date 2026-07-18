@@ -30,34 +30,6 @@ EXCLUDED_DIRS = {
     ".pytest_cache",
 }
 
-TEXT_SUFFIXES = {
-    "",
-    ".cfg",
-    ".conf",
-    ".css",
-    ".csv",
-    ".env",
-    ".html",
-    ".ini",
-    ".js",
-    ".json",
-    ".jsx",
-    ".key",
-    ".md",
-    ".mjs",
-    ".pem",
-    ".properties",
-    ".py",
-    ".sh",
-    ".toml",
-    ".ts",
-    ".tsx",
-    ".txt",
-    ".yaml",
-    ".yml",
-}
-
-
 @dataclass(frozen=True)
 class Rule:
     name: str
@@ -132,11 +104,13 @@ def candidate_files(root: Path) -> list[Path]:
 
 
 def is_scannable(path: Path) -> bool:
+    """Scan every publishable candidate instead of trusting filename suffixes.
+
+    Generated credentials and exports often use uncommon extensions. Decode and
+    size checks in ``scan`` fail closed when a candidate cannot be inspected.
+    """
+
     if any(part in EXCLUDED_DIRS for part in path.relative_to(ROOT).parts):
-        return False
-    name = path.name.lower()
-    is_dotenv = name == ".env" or name.startswith(".env.")
-    if path.suffix.lower() not in TEXT_SUFFIXES and not is_dotenv:
         return False
     return True
 
@@ -196,6 +170,7 @@ def run_untracked_probe() -> int:
     dotenv_probe = ROOT / ".env.local"
     private_key_probe = ROOT / ".public-content-guard-private-key.pem"
     token_probe = ROOT / ".public-content-guard-token.ini"
+    arbitrary_suffix_probe = ROOT / ".public-content-guard-token.xml"
     safe_probe = ROOT / ".public-content-guard-safe.conf"
     oversized_probe = ROOT / ".public-content-guard-oversized.txt"
     invalid_utf8_probe = ROOT / ".public-content-guard-invalid-utf8.txt"
@@ -203,6 +178,7 @@ def run_untracked_probe() -> int:
         dotenv_probe,
         private_key_probe,
         token_probe,
+        arbitrary_suffix_probe,
         safe_probe,
         oversized_probe,
         invalid_utf8_probe,
@@ -227,6 +203,12 @@ def run_untracked_probe() -> int:
     token_probe.write_text(
         "[credentials]\n"
         f"token={fake_token}\n",
+        encoding="utf-8",
+    )
+    arbitrary_suffix_probe.write_text(
+        "<credentials>\n"
+        f"  <token>{fake_token}</token>\n"
+        "</credentials>\n",
         encoding="utf-8",
     )
     safe_probe.write_text(
@@ -260,6 +242,8 @@ def run_untracked_probe() -> int:
         "Remove private key material and rotate the exposed key.",
         ".public-content-guard-token.ini:2: github-token — "
         "Remove GitHub tokens from public artifacts and rotate the token.",
+        ".public-content-guard-token.xml:2: github-token — "
+        "Remove GitHub tokens from public artifacts and rotate the token.",
     ]
     if probe_findings != expected:
         print(
@@ -269,7 +253,7 @@ def run_untracked_probe() -> int:
         return 1
 
     print(
-        "Public content guard self-test passed: detected dotenv, PEM, and INI secrets, "
+        "Public content guard self-test passed: detected dotenv, PEM, INI, and arbitrary-suffix secrets, "
         "rejected oversized and invalid-UTF-8 text artifacts, ignored a safe config, "
         f"and scanned {len(paths)} candidate files."
     )
