@@ -50,6 +50,11 @@ RULES = (
         "Remove GitHub tokens from public artifacts and rotate the token.",
     ),
     Rule(
+        "github-fine-grained-token",
+        re.compile(r"github_pat_[A-Za-z0-9_]{40,}"),
+        "Remove fine-grained GitHub tokens from public artifacts and rotate the token.",
+    ),
+    Rule(
         "openai-key",
         re.compile(r"sk-(?:proj-)?[A-Za-z0-9_-]{32,}"),
         "Remove model-provider API keys and rotate the credential.",
@@ -177,6 +182,7 @@ def run_untracked_probe() -> int:
     dotenv_probe = ROOT / ".env.local"
     private_key_probe = ROOT / ".public-content-guard-private-key.pem"
     token_probe = ROOT / ".public-content-guard-token.ini"
+    fine_grained_token_probe = ROOT / ".public-content-guard-fine-grained-pat.txt"
     arbitrary_suffix_probe = ROOT / ".public-content-guard-token.xml"
     newline_probe = ROOT / ".public-content-guard-newline\nprobe.txt"
     safe_probe = ROOT / ".public-content-guard-safe.conf"
@@ -186,6 +192,7 @@ def run_untracked_probe() -> int:
         dotenv_probe,
         private_key_probe,
         token_probe,
+        fine_grained_token_probe,
         arbitrary_suffix_probe,
         newline_probe,
         safe_probe,
@@ -198,6 +205,7 @@ def run_untracked_probe() -> int:
         return 1
 
     fake_token = "ghp_" + ("A" * 36)
+    fake_fine_grained_token = "github" + "_pat_" + ("A" * 64)
     fake_openai_key = "sk-proj-" + ("A" * 40)
     dotenv_probe.write_text(
         "# temporary dotenv guard self-test file\n"
@@ -212,6 +220,10 @@ def run_untracked_probe() -> int:
     token_probe.write_text(
         "[credentials]\n"
         f"token={fake_token}\n",
+        encoding="utf-8",
+    )
+    fine_grained_token_probe.write_text(
+        f"token={fake_fine_grained_token}\n",
         encoding="utf-8",
     )
     arbitrary_suffix_probe.write_text(
@@ -243,6 +255,8 @@ def run_untracked_probe() -> int:
     expected = [
         ".env.local:2: openai-key — "
         "Remove model-provider API keys and rotate the credential.",
+        ".public-content-guard-fine-grained-pat.txt:1: github-fine-grained-token — "
+        "Remove fine-grained GitHub tokens from public artifacts and rotate the token.",
         ".public-content-guard-invalid-utf8.txt: non-utf8-text-file — "
         "File uses invalid UTF-8; convert it to UTF-8 or inspect it manually before publishing.",
         ".public-content-guard-newline\\nprobe.txt:1: github-token — "
@@ -265,7 +279,8 @@ def run_untracked_probe() -> int:
         return 1
 
     print(
-        "Public content guard self-test passed: detected dotenv, PEM, INI, arbitrary-suffix, and newline-path secrets, "
+        "Public content guard self-test passed: detected classic and fine-grained GitHub tokens, "
+        "dotenv, PEM, INI, arbitrary-suffix, and newline-path secrets, "
         "rejected oversized and invalid-UTF-8 text artifacts, ignored a safe config, "
         f"and scanned {len(paths)} candidate files."
     )
