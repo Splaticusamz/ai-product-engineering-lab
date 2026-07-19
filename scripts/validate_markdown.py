@@ -2,13 +2,14 @@
 """Validate repository Markdown structure and local artifact links.
 
 The checks stay intentionally small, but they distinguish document structure from
-examples inside fenced code blocks and reject relative links that are missing or
-escape the repository.
+examples inside fenced code blocks and reject relative links that are missing,
+escape the repository, or reference nonexistent Markdown anchors.
 """
 
 from __future__ import annotations
 
 import argparse
+import html
 import re
 import tempfile
 from pathlib import Path
@@ -21,6 +22,10 @@ INLINE_LINK_RE = re.compile(
     r"!?\[[^\]]*\]\(\s*(?:<([^>]+)>|((?:[^\s()]|\([^()]*\))+))"
 )
 REFERENCE_LINK_RE = re.compile(r"^ {0,3}\[[^\]]+\]:\s*(?:<([^>]+)>|([^\s]+))")
+HEADING_RE = re.compile(r"^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$")
+EXPLICIT_ANCHOR_RE = re.compile(
+    r"<a\s+[^>]*(?:id|name)\s*=\s*['\"]([^'\"]+)['\"][^>]*>", re.IGNORECASE
+)
 
 
 def iter_markdown_files() -> list[Path]:
@@ -92,8 +97,46 @@ def validate_text(text: str) -> list[str]:
     return failures
 
 
+def github_heading_slug(label: str) -> str:
+    """Approximate GitHub's Markdown heading IDs for practical local-link checks."""
+
+    label = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", label)
+    label = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", label)
+    label = re.sub(r"<[^>]+>", "", label)
+    label = html.unescape(label).lower().replace("`", "")
+    label = "".join(
+        char for char in label if char.isalnum() or char in {"_", "-"} or char.isspace()
+    )
+    return re.sub(r"\s+", "-", label.strip())
+
+
+def markdown_anchors(text: str) -> set[str]:
+    """Return heading and explicit anchor IDs outside fenced examples."""
+
+    anchors: set[str] = set()
+    slug_counts: dict[str, int] = {}
+    heading_anchors: set[str] = set()
+    numbered_lines, _ = numbered_structural_lines(text)
+    for _, line in numbered_lines:
+        heading_match = HEADING_RE.match(line)
+        if heading_match:
+            base = github_heading_slug(heading_match.group(1))
+            if base:
+                duplicate_index = slug_counts.get(base, 0)
+                slug = base if duplicate_index == 0 else f"{base}-{duplicate_index}"
+                while slug in heading_anchors:
+                    duplicate_index += 1
+                    slug = f"{base}-{duplicate_index}"
+                slug_counts[base] = duplicate_index + 1
+                heading_anchors.add(slug)
+                anchors.add(slug)
+        for anchor_match in EXPLICIT_ANCHOR_RE.finditer(line):
+            anchors.add(anchor_match.group(1))
+    return anchors
+
+
 def validate_local_links(text: str, source_path: Path) -> list[str]:
-    """Reject missing or repo-escaping relative links outside code fences."""
+    """Reject missing, repo-escaping, or broken Markdown links outside code fences."""
 
     failures: list[str] = []
     numbered_lines, _ = numbered_structural_lines(text)
@@ -108,10 +151,14 @@ def validate_local_links(text: str, source_path: Path) -> list[str]:
         for match in matches:
             target = next(group for group in match.groups() if group is not None)
             parsed = urlsplit(target)
-            if parsed.scheme or target.startswith(("#", "//", "/")) or not parsed.path:
+            if parsed.scheme or target.startswith(("//", "/")):
                 continue
 
-            candidate = (source_path.parent / unquote(parsed.path)).resolve()
+            candidate = (
+                (source_path.parent / unquote(parsed.path)).resolve()
+                if parsed.path
+                else source_path.resolve()
+            )
             try:
                 candidate.relative_to(root)
             except ValueError:
@@ -124,6 +171,19 @@ def validate_local_links(text: str, source_path: Path) -> list[str]:
                 failures.append(
                     f"line {line_number}: local link target does not exist: {target!r}"
                 )
+                continue
+
+            if parsed.fragment and candidate.suffix.lower() == ".md":
+                fragment = unquote(parsed.fragment)
+                target_text = (
+                    text
+                    if candidate == source_path.resolve()
+                    else candidate.read_text(encoding="utf-8")
+                )
+                if fragment not in markdown_anchors(target_text):
+                    failures.append(
+                        f"line {line_number}: Markdown anchor does not exist: {target!r}"
+                    )
 
     return failures
 
@@ -193,7 +253,15 @@ def run_self_test() -> int:
         valid.write_text(
             "# Valid links\n\n"
             "This fixture links to real artifacts and ignores links shown only as examples.\n\n"
-            "[real target](target.md)\n"
+            "## Repeated section\n\n"
+            "## Repeated section-1\n\n"
+            "## Repeated section\n\n"
+            "<a id=\"manual-checkpoint\"></a>\n\n"
+            "[same-file heading](#repeated-section)\n"
+            "[literal suffixed heading](#repeated-section-1)\n"
+            "[collision-safe duplicate](#repeated-section-2)\n"
+            "[explicit anchor](#manual-checkpoint)\n"
+            "[real target](target.md#target)\n"
             "[versioned target](target_(v2).md)\n\n"
             "```markdown\n[example only](missing-example.md)\n```\n",
             encoding="utf-8",
@@ -212,6 +280,14 @@ def run_self_test() -> int:
             "[outside artifact](../../outside.md)\n",
             encoding="utf-8",
         )
+        broken_anchor = base / "broken-anchor.md"
+        broken_anchor.write_text(
+            "# Broken anchor\n\n"
+            "This fixture is long enough but points to a heading fragment that does not exist.\n\n"
+            "```markdown\n## Missing section\n```\n\n"
+            "[missing section](#missing-section)\n",
+            encoding="utf-8",
+        )
 
         link_expectations = {
             "valid-links": (valid, []),
@@ -222,6 +298,10 @@ def run_self_test() -> int:
             "escaping-link": (
                 escaping,
                 ["line 5: local link escapes repository: '../../outside.md'"],
+            ),
+            "broken-anchor": (
+                broken_anchor,
+                ["line 9: Markdown anchor does not exist: '#missing-section'"],
             ),
         }
         for name, (path, expected) in link_expectations.items():
@@ -236,7 +316,7 @@ def run_self_test() -> int:
     total_fixtures = len(fixtures) + len(link_expectations)
     print(
         f"Markdown validator self-test passed for {total_fixtures} fixtures, "
-        "including fenced examples and local link targets."
+        "including fenced examples, local link targets, and Markdown anchors."
     )
     return 0
 
@@ -246,7 +326,7 @@ def main() -> int:
     parser.add_argument(
         "--self-test",
         action="store_true",
-        help="Run focused fixtures for headings, code fences, and local links.",
+        help="Run focused fixtures for headings, code fences, local links, and anchors.",
     )
     args = parser.parse_args()
 
