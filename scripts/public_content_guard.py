@@ -56,8 +56,13 @@ RULES = (
     ),
     Rule(
         "openai-key",
-        re.compile(r"sk-(?:proj-)?[A-Za-z0-9_-]{32,}"),
+        re.compile(r"sk-(?!ant-)(?:proj-)?[A-Za-z0-9_-]{32,}"),
         "Remove model-provider API keys and rotate the credential.",
+    ),
+    Rule(
+        "anthropic-key",
+        re.compile(r"sk-ant-(?:api|admin)\d{2}-[A-Za-z0-9_-]{32,}"),
+        "Remove Anthropic API or Admin keys and rotate the credential.",
     ),
     Rule(
         "huggingface-token",
@@ -189,6 +194,7 @@ def run_untracked_probe() -> int:
     token_probe = ROOT / ".public-content-guard-token.ini"
     fine_grained_token_probe = ROOT / ".public-content-guard-fine-grained-pat.txt"
     huggingface_token_probe = ROOT / ".public-content-guard-huggingface-token.txt"
+    anthropic_token_probe = ROOT / ".public-content-guard-anthropic-token.txt"
     arbitrary_suffix_probe = ROOT / ".public-content-guard-token.xml"
     newline_probe = ROOT / ".public-content-guard-newline\nprobe.txt"
     safe_probe = ROOT / ".public-content-guard-safe.conf"
@@ -200,6 +206,7 @@ def run_untracked_probe() -> int:
         token_probe,
         fine_grained_token_probe,
         huggingface_token_probe,
+        anthropic_token_probe,
         arbitrary_suffix_probe,
         newline_probe,
         safe_probe,
@@ -214,6 +221,8 @@ def run_untracked_probe() -> int:
     fake_token = "ghp_" + ("A" * 36)
     fake_fine_grained_token = "github" + "_pat_" + ("A" * 64)
     fake_huggingface_token = "hf" + "_" + ("A" * 34)
+    fake_anthropic_token = "sk" + "-ant-api03-" + ("A" * 48)
+    fake_anthropic_admin_token = "sk" + "-ant-admin01-" + ("A" * 48)
     fake_openai_key = "sk-proj-" + ("A" * 40)
     dotenv_probe.write_text(
         "# temporary dotenv guard self-test file\n"
@@ -236,6 +245,11 @@ def run_untracked_probe() -> int:
     )
     huggingface_token_probe.write_text(
         f"HF_TOKEN={fake_huggingface_token}\n",
+        encoding="utf-8",
+    )
+    anthropic_token_probe.write_text(
+        f"ANTHROPIC_API_KEY={fake_anthropic_token}\n"
+        f"ANTHROPIC_ADMIN_KEY={fake_anthropic_admin_token}\n",
         encoding="utf-8",
     )
     arbitrary_suffix_probe.write_text(
@@ -267,6 +281,10 @@ def run_untracked_probe() -> int:
     expected = [
         ".env.local:2: openai-key — "
         "Remove model-provider API keys and rotate the credential.",
+        ".public-content-guard-anthropic-token.txt:1: anthropic-key — "
+        "Remove Anthropic API or Admin keys and rotate the credential.",
+        ".public-content-guard-anthropic-token.txt:2: anthropic-key — "
+        "Remove Anthropic API or Admin keys and rotate the credential.",
         ".public-content-guard-fine-grained-pat.txt:1: github-fine-grained-token — "
         "Remove fine-grained GitHub tokens from public artifacts and rotate the token.",
         ".public-content-guard-huggingface-token.txt:1: huggingface-token — "
@@ -294,7 +312,7 @@ def run_untracked_probe() -> int:
 
     print(
         "Public content guard self-test passed: detected classic and fine-grained GitHub tokens, "
-        "Hugging Face tokens, dotenv, PEM, INI, arbitrary-suffix, and newline-path secrets, "
+        "Hugging Face and Anthropic tokens, dotenv, PEM, INI, arbitrary-suffix, and newline-path secrets, "
         "rejected oversized and invalid-UTF-8 text artifacts, ignored a safe config, "
         f"and scanned {len(paths)} candidate files."
     )
