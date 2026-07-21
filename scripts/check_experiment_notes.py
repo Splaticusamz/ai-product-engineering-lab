@@ -26,6 +26,13 @@ FORBIDDEN_PLACEHOLDERS = (
     "placeholder",
 )
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+RUNNABLE_SHELL_COMMAND_RE = re.compile(
+    r"^\s*(?:\$\s*)?(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*"
+    r"(?:python(?:3(?:\.\d+)?)?|pytest|uv|pip3?|npm|npx|pnpm|yarn|bun|node|deno|"
+    r"curl|wget|git|gh|make|docker|podman|go|cargo|rustc|java|mvn|gradle|dotnet|"
+    r"ruby|bundle|php|composer|bash|sh|zsh)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -73,6 +80,58 @@ def markdown_headings(lines: list[str]) -> set[str]:
     return headings
 
 
+def bash_blocks(text: str) -> list[tuple[int, list[str]]]:
+    """Return opening line numbers and bodies for fenced Bash examples."""
+
+    blocks: list[tuple[int, list[str]]] = []
+    fence_char: str | None = None
+    fence_length = 0
+    opening_line = 0
+    is_bash = False
+    body: list[str] = []
+
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        match = FENCE_RE.match(line)
+        if fence_char is None:
+            if not match:
+                continue
+            marker, suffix = match.groups()
+            fence_char = marker[0]
+            fence_length = len(marker)
+            opening_line = line_number
+            language = suffix.strip().split(maxsplit=1)[0].lower() if suffix.strip() else ""
+            is_bash = language == "bash"
+            body = []
+            continue
+
+        if match:
+            marker, suffix = match.groups()
+            if marker[0] == fence_char and len(marker) >= fence_length and not suffix.strip():
+                if is_bash:
+                    blocks.append((opening_line, body))
+                fence_char = None
+                fence_length = 0
+                opening_line = 0
+                is_bash = False
+                body = []
+                continue
+
+        if is_bash:
+            body.append(line)
+
+    return blocks
+
+
+def has_runnable_shell_command(lines: list[str]) -> bool:
+    """Reject empty/comment-only blocks and prose that only names a tool elsewhere."""
+
+    return any(
+        RUNNABLE_SHELL_COMMAND_RE.match(line)
+        for line in lines
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+
+
 def validate_note(path: Path) -> list[Finding]:
     text = path.read_text(encoding="utf-8")
     headings = markdown_headings(lines_outside_fences(text))
@@ -91,8 +150,14 @@ def validate_note(path: Path) -> list[Finding]:
         if re.search(rf"\b{re.escape(marker)}\b", lowered):
             findings.append(Finding(path, f"contains placeholder marker: {marker!r}"))
 
-    if "```bash" in text and "python" not in lowered and "npm" not in lowered and "curl" not in lowered:
-        findings.append(Finding(path, "bash block does not include a runnable command family"))
+    for opening_line, lines in bash_blocks(text):
+        if not has_runnable_shell_command(lines):
+            findings.append(
+                Finding(
+                    path,
+                    f"bash block opened at line {opening_line} does not include a runnable command family",
+                )
+            )
 
     return findings
 
@@ -118,8 +183,17 @@ def run_self_test() -> int:
             "## Question\n\nCan this validator distinguish examples from document structure?\n\n"
             "## Hypothesis\n\nOnly headings outside fences should satisfy required sections.\n\n"
             "## Results\n\nThe focused fixture defines the expected behavior.\n\n"
-            "```markdown\n## Question\n## Hypothesis\n## Results\n```\n",
+            "```markdown\n## Question\n## Hypothesis\n## Results\n```\n\n"
+            "```bash\npython3 scripts/check_experiment_notes.py --self-test\n```\n",
             [],
+        ),
+        "comment-only-bash": (
+            "# Comment-only Bash Block\n\n"
+            "## Question\n\nCan a Python experiment note pass with a non-runnable shell example?\n\n"
+            "## Hypothesis\n\nThe validator should reject comment-only Bash blocks.\n\n"
+            "## Results\n\nThe fixture keeps command-family words outside the fenced block.\n\n"
+            "```bash\n# install dependencies before running the example\n```\n",
+            ["bash block opened at line 15 does not include a runnable command family"],
         ),
     }
 
@@ -138,8 +212,8 @@ def run_self_test() -> int:
                 return 1
 
     print(
-        "Experiment note validator self-test passed: fenced-only headings rejected "
-        f"and valid structure accepted across {len(fixtures)} fixtures."
+        "Experiment note validator self-test passed: fenced-only headings and comment-only Bash blocks rejected "
+        f"while valid structure was accepted across {len(fixtures)} fixtures."
     )
     return 0
 
