@@ -65,6 +65,11 @@ RULES = (
         "Remove Anthropic API or Admin keys and rotate the credential.",
     ),
     Rule(
+        "stripe-secret-key",
+        re.compile(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{24,}\b"),
+        "Remove Stripe secret or restricted API keys and rotate the credential.",
+    ),
+    Rule(
         "huggingface-token",
         re.compile(r"hf_[A-Za-z0-9]{30,}"),
         "Remove Hugging Face access tokens from public artifacts and rotate the token.",
@@ -195,6 +200,7 @@ def run_untracked_probe() -> int:
     fine_grained_token_probe = ROOT / ".public-content-guard-fine-grained-pat.txt"
     huggingface_token_probe = ROOT / ".public-content-guard-huggingface-token.txt"
     anthropic_token_probe = ROOT / ".public-content-guard-anthropic-token.txt"
+    stripe_token_probe = ROOT / ".public-content-guard-stripe-token.txt"
     arbitrary_suffix_probe = ROOT / ".public-content-guard-token.xml"
     newline_probe = ROOT / ".public-content-guard-newline\nprobe.txt"
     safe_probe = ROOT / ".public-content-guard-safe.conf"
@@ -207,6 +213,7 @@ def run_untracked_probe() -> int:
         fine_grained_token_probe,
         huggingface_token_probe,
         anthropic_token_probe,
+        stripe_token_probe,
         arbitrary_suffix_probe,
         newline_probe,
         safe_probe,
@@ -223,6 +230,9 @@ def run_untracked_probe() -> int:
     fake_huggingface_token = "hf" + "_" + ("A" * 34)
     fake_anthropic_token = "sk" + "-ant-api03-" + ("A" * 48)
     fake_anthropic_admin_token = "sk" + "-ant-admin01-" + ("A" * 48)
+    fake_stripe_secret = "sk" + "_live_" + ("A" * 32)
+    fake_stripe_restricted = "rk" + "_test_" + ("A" * 32)
+    fake_stripe_publishable = "pk" + "_test_" + ("A" * 32)
     fake_openai_key = "sk-proj-" + ("A" * 40)
     dotenv_probe.write_text(
         "# temporary dotenv guard self-test file\n"
@@ -252,6 +262,11 @@ def run_untracked_probe() -> int:
         f"ANTHROPIC_ADMIN_KEY={fake_anthropic_admin_token}\n",
         encoding="utf-8",
     )
+    stripe_token_probe.write_text(
+        f"STRIPE_SECRET_KEY={fake_stripe_secret}\n"
+        f"STRIPE_RESTRICTED_KEY={fake_stripe_restricted}\n",
+        encoding="utf-8",
+    )
     arbitrary_suffix_probe.write_text(
         "<credentials>\n"
         f"  <token>{fake_token}</token>\n"
@@ -261,7 +276,8 @@ def run_untracked_probe() -> int:
     newline_probe.write_text(f"token={fake_token}\n", encoding="utf-8")
     safe_probe.write_text(
         "mode=development\n"
-        "retries=2\n",
+        "retries=2\n"
+        f"STRIPE_PUBLISHABLE_KEY={fake_stripe_publishable}\n",
         encoding="utf-8",
     )
     oversized_probe.write_bytes(b"A" * (MAX_TEXT_BYTES + 1))
@@ -298,6 +314,10 @@ def run_untracked_probe() -> int:
         f"{MAX_TEXT_BYTES}-byte scan limit.",
         ".public-content-guard-private-key.pem:2: private-key-block — "
         "Remove private key material and rotate the exposed key.",
+        ".public-content-guard-stripe-token.txt:1: stripe-secret-key — "
+        "Remove Stripe secret or restricted API keys and rotate the credential.",
+        ".public-content-guard-stripe-token.txt:2: stripe-secret-key — "
+        "Remove Stripe secret or restricted API keys and rotate the credential.",
         ".public-content-guard-token.ini:2: github-token — "
         "Remove GitHub tokens from public artifacts and rotate the token.",
         ".public-content-guard-token.xml:2: github-token — "
@@ -312,7 +332,7 @@ def run_untracked_probe() -> int:
 
     print(
         "Public content guard self-test passed: detected classic and fine-grained GitHub tokens, "
-        "Hugging Face and Anthropic tokens, dotenv, PEM, INI, arbitrary-suffix, and newline-path secrets, "
+        "Hugging Face, Anthropic, and Stripe tokens, dotenv, PEM, INI, arbitrary-suffix, and newline-path secrets, "
         "rejected oversized and invalid-UTF-8 text artifacts, ignored a safe config, "
         f"and scanned {len(paths)} candidate files."
     )
