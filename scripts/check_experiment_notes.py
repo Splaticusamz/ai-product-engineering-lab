@@ -26,6 +26,7 @@ FORBIDDEN_PLACEHOLDERS = (
     "placeholder",
 )
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+SHELL_FENCE_LANGUAGES = {"bash", "sh", "shell", "zsh"}
 RUNNABLE_SHELL_COMMAND_RE = re.compile(
     r"^\s*(?:\$\s*)?(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*"
     r"(?:python(?:3(?:\.\d+)?)?|pytest|uv|pip3?|npm|npx|pnpm|yarn|bun|node|deno|"
@@ -80,14 +81,14 @@ def markdown_headings(lines: list[str]) -> set[str]:
     return headings
 
 
-def bash_blocks(text: str) -> list[tuple[int, list[str]]]:
-    """Return opening line numbers and bodies for fenced Bash examples."""
+def shell_blocks(text: str) -> list[tuple[int, list[str]]]:
+    """Return opening line numbers and bodies for common fenced shell examples."""
 
     blocks: list[tuple[int, list[str]]] = []
     fence_char: str | None = None
     fence_length = 0
     opening_line = 0
-    is_bash = False
+    is_shell = False
     body: list[str] = []
 
     for line_number, line in enumerate(text.splitlines(), start=1):
@@ -100,23 +101,23 @@ def bash_blocks(text: str) -> list[tuple[int, list[str]]]:
             fence_length = len(marker)
             opening_line = line_number
             language = suffix.strip().split(maxsplit=1)[0].lower() if suffix.strip() else ""
-            is_bash = language == "bash"
+            is_shell = language in SHELL_FENCE_LANGUAGES
             body = []
             continue
 
         if match:
             marker, suffix = match.groups()
             if marker[0] == fence_char and len(marker) >= fence_length and not suffix.strip():
-                if is_bash:
+                if is_shell:
                     blocks.append((opening_line, body))
                 fence_char = None
                 fence_length = 0
                 opening_line = 0
-                is_bash = False
+                is_shell = False
                 body = []
                 continue
 
-        if is_bash:
+        if is_shell:
             body.append(line)
 
     return blocks
@@ -150,12 +151,12 @@ def validate_note(path: Path) -> list[Finding]:
         if re.search(rf"\b{re.escape(marker)}\b", lowered):
             findings.append(Finding(path, f"contains placeholder marker: {marker!r}"))
 
-    for opening_line, lines in bash_blocks(text):
+    for opening_line, lines in shell_blocks(text):
         if not has_runnable_shell_command(lines):
             findings.append(
                 Finding(
                     path,
-                    f"bash block opened at line {opening_line} does not include a runnable command family",
+                    f"shell block opened at line {opening_line} does not include a runnable command family",
                 )
             )
 
@@ -193,7 +194,15 @@ def run_self_test() -> int:
             "## Hypothesis\n\nThe validator should reject comment-only Bash blocks.\n\n"
             "## Results\n\nThe fixture keeps command-family words outside the fenced block.\n\n"
             "```bash\n# install dependencies before running the example\n```\n",
-            ["bash block opened at line 15 does not include a runnable command family"],
+            ["shell block opened at line 15 does not include a runnable command family"],
+        ),
+        "comment-only-sh": (
+            "# Comment-only Sh Block\n\n"
+            "## Question\n\nCan an experiment pass with a non-runnable sh example?\n\n"
+            "## Hypothesis\n\nThe validator should inspect common shell fence aliases.\n\n"
+            "## Results\n\nThe fixture demonstrates parity between Bash and sh fences.\n\n"
+            "```sh\n# no runnable command\n```\n",
+            ["shell block opened at line 15 does not include a runnable command family"],
         ),
     }
 
@@ -212,7 +221,7 @@ def run_self_test() -> int:
                 return 1
 
     print(
-        "Experiment note validator self-test passed: fenced-only headings and comment-only Bash blocks rejected "
+        "Experiment note validator self-test passed: fenced-only headings and comment-only shell blocks rejected "
         f"while valid structure was accepted across {len(fixtures)} fixtures."
     )
     return 0
