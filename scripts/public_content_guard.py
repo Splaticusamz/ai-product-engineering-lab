@@ -70,6 +70,11 @@ RULES = (
         "Remove Stripe secret or restricted API keys and rotate the credential.",
     ),
     Rule(
+        "stripe-webhook-secret",
+        re.compile(r"\bwhsec_[A-Za-z0-9]{24,}\b"),
+        "Remove Stripe webhook signing secrets and rotate the endpoint secret.",
+    ),
+    Rule(
         "huggingface-token",
         re.compile(r"hf_[A-Za-z0-9]{30,}"),
         "Remove Hugging Face access tokens from public artifacts and rotate the token.",
@@ -201,6 +206,7 @@ def run_untracked_probe() -> int:
     huggingface_token_probe = ROOT / ".public-content-guard-huggingface-token.txt"
     anthropic_token_probe = ROOT / ".public-content-guard-anthropic-token.txt"
     stripe_token_probe = ROOT / ".public-content-guard-stripe-token.txt"
+    stripe_webhook_probe = ROOT / ".public-content-guard-stripe-webhook.txt"
     arbitrary_suffix_probe = ROOT / ".public-content-guard-token.xml"
     newline_probe = ROOT / ".public-content-guard-newline\nprobe.txt"
     safe_probe = ROOT / ".public-content-guard-safe.conf"
@@ -214,6 +220,7 @@ def run_untracked_probe() -> int:
         huggingface_token_probe,
         anthropic_token_probe,
         stripe_token_probe,
+        stripe_webhook_probe,
         arbitrary_suffix_probe,
         newline_probe,
         safe_probe,
@@ -233,6 +240,7 @@ def run_untracked_probe() -> int:
     fake_stripe_secret = "sk" + "_live_" + ("A" * 32)
     fake_stripe_restricted = "rk" + "_test_" + ("A" * 32)
     fake_stripe_publishable = "pk" + "_test_" + ("A" * 32)
+    fake_stripe_webhook_secret = "whsec" + "_" + ("A" * 32)
     fake_openai_key = "sk-proj-" + ("A" * 40)
     dotenv_probe.write_text(
         "# temporary dotenv guard self-test file\n"
@@ -265,6 +273,10 @@ def run_untracked_probe() -> int:
     stripe_token_probe.write_text(
         f"STRIPE_SECRET_KEY={fake_stripe_secret}\n"
         f"STRIPE_RESTRICTED_KEY={fake_stripe_restricted}\n",
+        encoding="utf-8",
+    )
+    stripe_webhook_probe.write_text(
+        f"STRIPE_WEBHOOK_SECRET={fake_stripe_webhook_secret}\n",
         encoding="utf-8",
     )
     arbitrary_suffix_probe.write_text(
@@ -318,6 +330,8 @@ def run_untracked_probe() -> int:
         "Remove Stripe secret or restricted API keys and rotate the credential.",
         ".public-content-guard-stripe-token.txt:2: stripe-secret-key — "
         "Remove Stripe secret or restricted API keys and rotate the credential.",
+        ".public-content-guard-stripe-webhook.txt:1: stripe-webhook-secret — "
+        "Remove Stripe webhook signing secrets and rotate the endpoint secret.",
         ".public-content-guard-token.ini:2: github-token — "
         "Remove GitHub tokens from public artifacts and rotate the token.",
         ".public-content-guard-token.xml:2: github-token — "
@@ -332,7 +346,8 @@ def run_untracked_probe() -> int:
 
     print(
         "Public content guard self-test passed: detected classic and fine-grained GitHub tokens, "
-        "Hugging Face, Anthropic, and Stripe tokens, dotenv, PEM, INI, arbitrary-suffix, and newline-path secrets, "
+        "Hugging Face, Anthropic, Stripe API keys, and Stripe webhook secrets, dotenv, PEM, INI, "
+        "arbitrary-suffix, and newline-path secrets, "
         "rejected oversized and invalid-UTF-8 text artifacts, ignored a safe config, "
         f"and scanned {len(paths)} candidate files."
     )
